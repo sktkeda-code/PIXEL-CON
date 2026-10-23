@@ -1,6 +1,7 @@
 """Procedural pixel stickers and glitter. No external artwork or network calls."""
 import random
 from PIL import Image, ImageDraw
+from message import add_message
 
 STICKERS = ("爱心", "星星", "蝴蝶结")
 PATTERNS = {
@@ -10,7 +11,7 @@ PATTERNS = {
 }
 
 
-def render_frame(base, stickers=(), glitter=True, phase=0):
+def render_frame(base, stickers=(), glitter=True, phase=0, message=None):
     """Positions and sizes are normalized so previews and exports match."""
     result = base.convert("RGBA").copy()
     width, height = result.size
@@ -44,14 +45,14 @@ def render_frame(base, stickers=(), glitter=True, phase=0):
                     color = "#702654" if pixel == "1" else fill
                     cx, cy = left + column * cell, top + row * cell
                     draw.rectangle((cx, cy, cx + cell - 1, cy + cell - 1), fill=color)
-    return result
+    return add_message(result, message)
 
 
-def animation_frames(base, stickers=(), glitter=True, max_side=720):
+def animation_frames(base, stickers=(), glitter=True, max_side=720, message=None):
     """Bound GIF memory; retain aspect ratio and never enlarge the input."""
     small = base.copy()
     small.thumbnail((max_side, max_side), Image.Resampling.NEAREST)
-    return [render_frame(small, stickers, glitter, phase) for phase in range(12 if glitter else 1)]
+    return [render_frame(small, stickers, glitter, phase, message) for phase in range(12 if glitter else 1)]
 
 
 def save_gif(path, frames):

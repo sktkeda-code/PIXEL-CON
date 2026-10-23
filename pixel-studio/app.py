@@ -1,7 +1,7 @@
 """Local image-to-pixel desktop application. Run: python app.py"""
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk, UnidentifiedImageError
 
@@ -22,11 +22,15 @@ class PixelStudio:
         self.frame_index = 0
         self.stickers = []
         self.result_bounds = None
+        self.message_box = [.1, .65, .8, .25]
+        self.message_color = "#FFFFFF"
+        self.text_drag = None
+        self.text_job = None
         root.title("像素工坊 · 图片转像素")
-        root.geometry("1080x730")
-        root.minsize(760, 520)
+        root.geometry("1120x900")
+        root.minsize(900, 760)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(3, weight=1)
+        root.rowconfigure(4, weight=1)
 
         header = ttk.Frame(root, padding=(20, 18))
         header.grid(row=0, column=0, sticky="ew")
@@ -66,8 +70,23 @@ class PixelStudio:
         ttk.Button(effects, text="清空贴纸", command=self.clear_stickers).grid(row=1, column=4, pady=(10, 0))
         ttk.Label(effects, text="生成后启用 Blingee，选好贴纸，再点击右侧图片放置。关闭开关保留贴纸，重新生成保留布局；换图清空。").grid(row=2, column=0, columnspan=5, sticky="w", pady=(10, 0))
 
+        message_controls = ttk.LabelFrame(root, text="文字留言", padding=10)
+        message_controls.grid(row=3, column=0, sticky="ew", padx=20, pady=(0, 12))
+        self.message_enabled = tk.BooleanVar(value=False)
+        self.edit_message = tk.BooleanVar(value=False)
+        ttk.Checkbutton(message_controls, text="显示留言", variable=self.message_enabled, command=self.refresh_effects).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(message_controls, text="调整留言区域", variable=self.edit_message, command=self.redraw).grid(row=0, column=1, sticky="w")
+        self.color_button = tk.Button(message_controls, text="选择颜色", command=self.choose_message_color, background=self.message_color)
+        self.color_button.grid(row=0, column=2, padx=8)
+        ttk.Button(message_controls, text="重置区域", command=self.reset_message_box).grid(row=0, column=3)
+        self.message_input = tk.Text(message_controls, height=2, width=55, wrap="word", font=("Microsoft YaHei UI", 11), undo=True)
+        self.message_input.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(8, 4))
+        message_controls.columnconfigure(1, weight=1)
+        self.message_input.bind("<<Modified>>", self.message_changed)
+        ttk.Label(message_controls, text="最多 300 字，支持换行；字体固定为微软雅黑，自动换行并适应区域。勾选调整后拖动虚线框移动，拖右下角缩放；编辑框不导出。").grid(row=2, column=0, columnspan=4, sticky="w")
+
         previews = ttk.Frame(root, padding=(20, 0, 20, 10))
-        previews.grid(row=3, column=0, sticky="nsew")
+        previews.grid(row=4, column=0, sticky="nsew")
         previews.rowconfigure(0, weight=1)
         self.canvases = {}
         for column, (key, title) in enumerate((("original", "原图"), ("result", "像素图"))):
@@ -78,10 +97,12 @@ class PixelStudio:
             canvas.pack(fill="both", expand=True)
             canvas.bind("<Configure>", self.schedule_redraw)
             self.canvases[key] = canvas
-        self.canvases["result"].bind("<Button-1>", self.place_sticker)
+        self.canvases["result"].bind("<Button-1>", self.canvas_press)
+        self.canvases["result"].bind("<B1-Motion>", self.canvas_drag)
+        self.canvases["result"].bind("<ButtonRelease-1>", self.canvas_release)
 
         self.status = tk.StringVar(value="尚未选择图片。支持 PNG、JPEG、WebP、BMP、GIF（仅首帧）。")
-        ttk.Label(root, textvariable=self.status, padding=(20, 10, 20, 16), wraplength=1000).grid(row=4, column=0, sticky="ew")
+        ttk.Label(root, textvariable=self.status, padding=(20, 10, 20, 16), wraplength=1000).grid(row=5, column=0, sticky="ew")
         self.redraw()
 
     def open_image(self):
@@ -139,7 +160,8 @@ class PixelStudio:
             messagebox.showerror("请选择新文件名", "请另存为新文件，以保留原图。")
             return
         try:
-            output = render_frame(self.result, self.stickers, self.glitter.get(), 0) if self.blingee.get() else self.result
+            output = render_frame(self.result, self.stickers if self.blingee.get() else (),
+                                  self.blingee.get() and self.glitter.get(), 0, self.message_data())
             output.save(path, format="PNG")
         except (OSError, ValueError, MemoryError) as error:
             messagebox.showerror("保存失败", str(error))
@@ -152,8 +174,9 @@ class PixelStudio:
             self.animation_job = None
         self.frame_index = 0
         self.frames = []
-        if self.result is not None and self.blingee.get():
-            self.frames = animation_frames(self.result, self.stickers, self.glitter.get())
+        if self.result is not None and (self.blingee.get() or self.message_enabled.get()):
+            self.frames = animation_frames(self.result, self.stickers if self.blingee.get() else (),
+                                          self.blingee.get() and self.glitter.get(), message=self.message_data())
         self.gif_button.configure(state="normal" if self.frames else "disabled")
         self.redraw()
         self.toggle_playback()
@@ -164,6 +187,69 @@ class PixelStudio:
             self.animation_job = None
         if len(self.frames) > 1 and self.playing.get():
             self.animation_job = self.root.after(160, self.animate)
+
+    def message_data(self):
+        if not self.message_enabled.get():
+            return None
+        return dict(text=self.message_input.get("1.0", "end-1c")[:300], color=self.message_color, box=self.message_box.copy())
+
+    def message_changed(self, _event=None):
+        if not self.message_input.edit_modified():
+            return
+        if len(self.message_input.get("1.0", "end-1c")) > 300:
+            self.message_input.delete("1.0+300c", "end-1c")
+        self.message_input.edit_modified(False)
+        if self.text_job is not None:
+            self.root.after_cancel(self.text_job)
+        self.text_job = self.root.after(200, self.apply_message_change)
+
+    def apply_message_change(self):
+        self.text_job = None
+        self.refresh_effects()
+
+    def choose_message_color(self):
+        color = colorchooser.askcolor(color=self.message_color, title="选择留言颜色", parent=self.root)[1]
+        if color:
+            self.message_color = color
+            self.color_button.configure(background=color)
+            self.refresh_effects()
+
+    def reset_message_box(self):
+        self.message_box = [.1, .65, .8, .25]
+        self.refresh_effects()
+
+    def canvas_press(self, event):
+        if not self.edit_message.get():
+            self.place_sticker(event)
+            return
+        if self.result is None or self.result_bounds is None:
+            return
+        left, top, width, height = self.result_bounds
+        bx, by, bw, bh = self.message_box
+        x0, y0 = left + bx * width, top + by * height
+        x1, y1 = x0 + bw * width, y0 + bh * height
+        if abs(event.x - x1) <= 12 and abs(event.y - y1) <= 12:
+            mode = "resize"
+        elif x0 <= event.x <= x1 and y0 <= event.y <= y1:
+            mode = "move"
+        else:
+            return
+        self.text_drag = (mode, event.x, event.y, self.message_box.copy(), width, height)
+
+    def canvas_drag(self, event):
+        if self.text_drag is None:
+            return
+        mode, x, y, old, width, height = self.text_drag
+        dx, dy = (event.x - x) / width, (event.y - y) / height
+        bx, by, bw, bh = old
+        if mode == "move":
+            self.message_box = [max(0, min(1-bw, bx+dx)), max(0, min(1-bh, by+dy)), bw, bh]
+        else:
+            self.message_box = [bx, by, max(.1, min(1-bx, bw+dx)), max(.08, min(1-by, bh+dy))]
+        self.refresh_effects()
+
+    def canvas_release(self, _event):
+        self.text_drag = None
 
     def animate(self):
         self.animation_job = None
@@ -206,6 +292,11 @@ class PixelStudio:
         self.refresh_effects()
 
     def export_gif(self):
+        # Export the latest text even when its debounced preview is still pending.
+        if self.text_job is not None:
+            self.root.after_cancel(self.text_job)
+            self.text_job = None
+        self.refresh_effects()
         if not self.frames:
             return
         path = filedialog.asksaveasfilename(title="导出 GIF（最长边 720 像素，透明处转白色）", defaultextension=".gif",
@@ -253,6 +344,13 @@ class PixelStudio:
             background.alpha_composite(preview)
             self.photos[key] = ImageTk.PhotoImage(background)
             canvas.create_image(width // 2, height // 2, image=self.photos[key])
+            if key == "result" and self.edit_message.get():
+                left, top, dw, dh = self.result_bounds
+                bx, by, bw, bh = self.message_box
+                x0, y0 = left + bx * dw, top + by * dh
+                x1, y1 = x0 + bw * dw, y0 + bh * dh
+                canvas.create_rectangle(x0, y0, x1, y1, outline="#00ffff", width=2, dash=(5, 3))
+                canvas.create_rectangle(x1-6, y1-6, x1+6, y1+6, fill="#00ffff", outline="black")
 
 
 if __name__ == "__main__":
