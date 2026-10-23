@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk, UnidentifiedImageError
 
 from pixelate import load_image, pixelate
+from blingee import STICKERS, animation_frames, render_frame, save_gif
 
 
 class PixelStudio:
@@ -16,16 +17,21 @@ class PixelStudio:
         self.source_path = None
         self.photos = {}
         self.resize_job = None
+        self.animation_job = None
+        self.frames = []
+        self.frame_index = 0
+        self.stickers = []
+        self.result_bounds = None
         root.title("像素工坊 · 图片转像素")
         root.geometry("1080x730")
         root.minsize(760, 520)
         root.columnconfigure(0, weight=1)
-        root.rowconfigure(2, weight=1)
+        root.rowconfigure(3, weight=1)
 
         header = ttk.Frame(root, padding=(20, 18))
         header.grid(row=0, column=0, sticky="ew")
         ttk.Label(header, text="像素工坊", font=("Microsoft YaHei UI", 22, "bold")).pack(anchor="w")
-        ttk.Label(header, text="选择本地图片 → 调整颗粒 → 生成像素图 → 保存 PNG。图片仅在本机处理。").pack(anchor="w", pady=(5, 0))
+        ttk.Label(header, text="本地图片转像素 · 可选 Blingee 闪粉与像素贴纸 · 图片仅在本机处理").pack(anchor="w", pady=(5, 0))
 
         controls = ttk.Frame(root, padding=(20, 0, 20, 14))
         controls.grid(row=1, column=0, sticky="ew")
@@ -38,8 +44,30 @@ class PixelStudio:
         self.save_button = ttk.Button(controls, text="保存 PNG…", command=self.save, state="disabled")
         self.save_button.pack(side="left")
 
+        effects = ttk.LabelFrame(root, text="个性化 · Blingee", padding=10)
+        effects.grid(row=2, column=0, sticky="ew", padx=20, pady=(0, 12))
+        self.blingee = tk.BooleanVar(value=False)
+        self.glitter = tk.BooleanVar(value=True)
+        self.playing = tk.BooleanVar(value=True)
+        ttk.Checkbutton(effects, text="启用 Blingee", variable=self.blingee, command=self.refresh_effects).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(effects, text="闪粉特效", variable=self.glitter, command=self.refresh_effects).grid(row=0, column=1, sticky="w", padx=8)
+        ttk.Checkbutton(effects, text="播放预览", variable=self.playing, command=self.toggle_playback).grid(row=0, column=2, sticky="w")
+        self.gif_button = ttk.Button(effects, text="导出 GIF…", command=self.export_gif, state="disabled")
+        self.gif_button.grid(row=0, column=3, padx=8)
+        ttk.Label(effects, text="贴纸：").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        self.sticker_kind = tk.StringVar(value=STICKERS[0])
+        ttk.Combobox(effects, textvariable=self.sticker_kind, values=STICKERS, state="readonly", width=9).grid(row=1, column=1, sticky="w", pady=(10, 0))
+        self.sticker_size = tk.StringVar(value="15")
+        size_controls = ttk.Frame(effects)
+        size_controls.grid(row=1, column=2, sticky="w", pady=(10, 0))
+        ttk.Label(size_controls, text="大小 %：").pack(side="left")
+        ttk.Spinbox(size_controls, from_=5, to=40, textvariable=self.sticker_size, width=4).pack(side="left")
+        ttk.Button(effects, text="撤销最后贴纸", command=self.undo_sticker).grid(row=1, column=3, pady=(10, 0), padx=8)
+        ttk.Button(effects, text="清空贴纸", command=self.clear_stickers).grid(row=1, column=4, pady=(10, 0))
+        ttk.Label(effects, text="生成后启用 Blingee，选好贴纸，再点击右侧图片放置。关闭开关保留贴纸，重新生成保留布局；换图清空。").grid(row=2, column=0, columnspan=5, sticky="w", pady=(10, 0))
+
         previews = ttk.Frame(root, padding=(20, 0, 20, 10))
-        previews.grid(row=2, column=0, sticky="nsew")
+        previews.grid(row=3, column=0, sticky="nsew")
         previews.rowconfigure(0, weight=1)
         self.canvases = {}
         for column, (key, title) in enumerate((("original", "原图"), ("result", "像素图"))):
@@ -50,9 +78,10 @@ class PixelStudio:
             canvas.pack(fill="both", expand=True)
             canvas.bind("<Configure>", self.schedule_redraw)
             self.canvases[key] = canvas
+        self.canvases["result"].bind("<Button-1>", self.place_sticker)
 
         self.status = tk.StringVar(value="尚未选择图片。支持 PNG、JPEG、WebP、BMP、GIF（仅首帧）。")
-        ttk.Label(root, textvariable=self.status, padding=(20, 10, 20, 16), wraplength=1000).grid(row=3, column=0, sticky="ew")
+        ttk.Label(root, textvariable=self.status, padding=(20, 10, 20, 16), wraplength=1000).grid(row=4, column=0, sticky="ew")
         self.redraw()
 
     def open_image(self):
@@ -72,6 +101,8 @@ class PixelStudio:
         self.original = image
         self.source_path = Path(path)
         self.result = None
+        self.stickers.clear()
+        self.refresh_effects()
         self.generate_button.configure(state="normal")
         self.save_button.configure(state="disabled")
         self.status.set(f"已读取 {self.source_path.name} · {image.width} × {image.height}。调整颗粒大小后点击生成。")
@@ -95,7 +126,7 @@ class PixelStudio:
         self.result = result
         self.save_button.configure(state="normal")
         self.status.set(f"生成完成 · 颗粒约 {size} 像素 · 输出 {result.width} × {result.height} · 透明背景保留。可反复调整后重新生成。")
-        self.redraw()
+        self.refresh_effects()
 
     def save(self):
         if self.result is None:
@@ -108,28 +139,108 @@ class PixelStudio:
             messagebox.showerror("请选择新文件名", "请另存为新文件，以保留原图。")
             return
         try:
-            self.result.save(path, format="PNG")
-        except (OSError, ValueError) as error:
+            output = render_frame(self.result, self.stickers, self.glitter.get(), 0) if self.blingee.get() else self.result
+            output.save(path, format="PNG")
+        except (OSError, ValueError, MemoryError) as error:
             messagebox.showerror("保存失败", str(error))
             return
         self.status.set(f"已保存：{path}")
+
+    def refresh_effects(self):
+        if self.animation_job is not None:
+            self.root.after_cancel(self.animation_job)
+            self.animation_job = None
+        self.frame_index = 0
+        self.frames = []
+        if self.result is not None and self.blingee.get():
+            self.frames = animation_frames(self.result, self.stickers, self.glitter.get())
+        self.gif_button.configure(state="normal" if self.frames else "disabled")
+        self.redraw()
+        self.toggle_playback()
+
+    def toggle_playback(self):
+        if self.animation_job is not None:
+            self.root.after_cancel(self.animation_job)
+            self.animation_job = None
+        if len(self.frames) > 1 and self.playing.get():
+            self.animation_job = self.root.after(160, self.animate)
+
+    def animate(self):
+        self.animation_job = None
+        if len(self.frames) > 1 and self.playing.get():
+            self.frame_index = (self.frame_index + 1) % len(self.frames)
+            self.redraw(result_only=True)
+            self.animation_job = self.root.after(160, self.animate)
+
+    def place_sticker(self, event):
+        if self.result is None or not self.blingee.get():
+            self.status.set("请先生成像素图并启用 Blingee，再点击右侧图片放置贴纸。")
+            return
+        if self.result_bounds is None:
+            return
+        left, top, width, height = self.result_bounds
+        if not (left <= event.x < left + width and top <= event.y < top + height):
+            return
+        try:
+            size = int(self.sticker_size.get())
+            if not 5 <= size <= 40:
+                raise ValueError()
+        except ValueError:
+            messagebox.showerror("贴纸大小不正确", "请输入 5～40 之间的整数。")
+            return
+        if len(self.stickers) >= 100:
+            messagebox.showinfo("贴纸数量", "最多可添加 100 张贴纸，请先撤销或清空。")
+            return
+        self.stickers.append(dict(kind=self.sticker_kind.get(), x=(event.x-left)/width,
+                                  y=(event.y-top)/height, size=size/100))
+        self.refresh_effects()
+        self.status.set(f"已放置 {len(self.stickers)} 张贴纸。PNG 保存静态首帧，GIF 导出循环闪粉（最长边不超过 720 像素、白色底）。")
+
+    def undo_sticker(self):
+        if self.stickers:
+            self.stickers.pop()
+            self.refresh_effects()
+
+    def clear_stickers(self):
+        self.stickers.clear()
+        self.refresh_effects()
+
+    def export_gif(self):
+        if not self.frames:
+            return
+        path = filedialog.asksaveasfilename(title="导出 GIF（最长边 720 像素，透明处转白色）", defaultextension=".gif",
+            initialfile=f"{self.source_path.stem}_blingee.gif", filetypes=[("GIF 动画", "*.gif")])
+        if not path:
+            return
+        if Path(path).resolve() == self.source_path.resolve():
+            messagebox.showerror("请选择新文件名", "请另存为新文件，以保留原图。")
+            return
+        try:
+            save_gif(path, self.frames)
+        except (OSError, ValueError, MemoryError) as error:
+            messagebox.showerror("GIF 导出失败", str(error))
+            return
+        self.status.set(f"已导出 GIF：{path} · {len(self.frames)} 帧 · 每帧 160 毫秒 · 白色底；未启用闪粉时为单帧。")
 
     def schedule_redraw(self, _event):
         if self.resize_job is not None:
             self.root.after_cancel(self.resize_job)
         self.resize_job = self.root.after(100, self.redraw)
 
-    def redraw(self):
-        self.resize_job = None
+    def redraw(self, result_only=False):
         for key, canvas in self.canvases.items():
+            if result_only and key != "result":
+                continue
             canvas.delete("all")
             width, height = max(1, canvas.winfo_width()), max(1, canvas.winfo_height())
-            image = self.original if key == "original" else self.result
+            image = self.original if key == "original" else (self.frames[self.frame_index] if self.frames else self.result)
             if image is None:
                 canvas.create_text(width // 2, height // 2, text="请选择图片" if key == "original" else "生成后在此预览", fill="#c9d0e4")
                 continue
             scale = min((max(1, width - 20)) / image.width, (max(1, height - 20)) / image.height, 1)
             dimensions = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+            if key == "result":
+                self.result_bounds = (width // 2 - dimensions[0] // 2, height // 2 - dimensions[1] // 2, *dimensions)
             preview = image.resize(dimensions, Image.Resampling.LANCZOS if key == "original" else Image.Resampling.NEAREST)
             # Checkerboard makes transparent regions visible without changing the exported image.
             background = Image.new("RGBA", dimensions, "#e1e3ea")
